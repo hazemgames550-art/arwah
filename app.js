@@ -1,6 +1,6 @@
 /* الأربع أرواح — الواجهة والأوض والصوت */
 (function () {
-  const VER = 1, MAXP = 4, GAME = 'arwah';
+  const VER = 2, MAXP = 4, GAME = 'arwah';
   const L = window.LOGIC, SP = L.SP;
   const $ = id => document.getElementById(id);
   function el(tag, attrs, ...kids) { const e = document.createElement(tag); if (attrs) for (const [k, v] of Object.entries(attrs)) { if (k === 'class') e.className = v; else if (k === 'style') e.setAttribute('style', v); else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v); } for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k))); return e; }
@@ -120,7 +120,9 @@
   const logArr = () => { const g = room && room.g; if (!g || !g.log) return []; return Array.isArray(g.log) ? g.log.filter(Boolean) : Object.keys(g.log).sort((a, b) => a - b).map(k => g.log[k]); };
   function recompute() {
     if (gLv < 0) return;
-    const ents = logArr().concat(pending), stack = [L.init(gLv)], evs = [];
+    const lg = logArr(), ids = new Set(lg.map(e => e && e.i));
+    pending = pending.filter(e => !ids.has(e.i));
+    const ents = lg.concat(pending), stack = [L.init(gLv)], evs = [];
     for (const e of ents) {
       const fresh = !shown.has(e.i); shown.add(e.i);
       if (e.u) { if (stack.length > 1) { stack.pop(); if (fresh) evs.push({ t: 'undo' }); } continue; }
@@ -143,7 +145,7 @@
       if (g.lv !== lv || g.att !== att) return undefined;
       const log = Array.isArray(g.log) ? g.log.filter(Boolean) : (g.log ? Object.keys(g.log).sort((a, b) => a - b).map(k => g.log[k]) : []);
       log.push(e); g.log = log; return g;
-    }, null, false).then(r => { pending = pending.filter(x => x.i !== e.i); if (!r || !r.committed) recompute(); })
+    }, null, false).then(r => { if (!r || !r.committed) { pending = pending.filter(x => x.i !== e.i); recompute(); } else setTimeout(() => { if (pending.some(x => x.i === e.i)) { pending = pending.filter(x => x.i !== e.i); recompute(); } }, 8000); })
       .catch(() => { pending = pending.filter(x => x.i !== e.i); recompute(); toast('الحركة ما اتبعتتش، اتأكد من النت'); });
   }
   function move(d) {
@@ -302,15 +304,25 @@
   /* ===================== الصوت ===================== */
   const PREF = { mic: false, spk: LS.get('aw_spk') !== '0', mus: LS.get('aw_mus') !== '0', sfx: LS.get('aw_sfx') !== '0' };
   const savePref = () => { LS.set('aw_spk', PREF.spk ? '1' : '0'); LS.set('aw_mus', PREF.mus ? '1' : '0'); LS.set('aw_sfx', PREF.sfx ? '1' : '0'); };
-  let AC = null, sfxBus = null, musBus = null, musLevel = 0, mus = null, noiseB = null, talking = false;
+  let AC = null, sfxBus = null, musBus = null, master = null, musLevel = 0, mus = null, noiseB = null, talking = false;
   function ac() {
     if (AC) return AC; const C = window.AudioContext || window.webkitAudioContext; if (!C) return null;
-    try { AC = new C(); } catch (e) { return null; }
-    const comp = AC.createDynamicsCompressor(); comp.connect(AC.destination);
-    sfxBus = AC.createGain(); sfxBus.gain.value = .5; sfxBus.connect(comp);
-    musBus = AC.createGain(); musBus.gain.value = 0; musBus.connect(comp);
+    // «playback» = مساحة أكبر للصوت، فمايقطّعش والموبايل مشغول بالرسم
+    try { AC = new C({ latencyHint: 'playback' }); } catch (e) { try { AC = new C(); } catch (x) { return null; } }
+    master = AC.createGain(); master.gain.value = .85;
+    const lim = AC.createDynamicsCompressor(); lim.threshold.value = -6; lim.knee.value = 6; lim.ratio.value = 6; lim.attack.value = .003; lim.release.value = .25;
+    master.connect(lim); lim.connect(AC.destination);
+    // صدى خفيف بيخلّي الصوت ناعم ونضيف
+    const conv = AC.createConvolver(); conv.buffer = impulse(2.6); const wet = AC.createGain(); wet.gain.value = .8; conv.connect(wet); wet.connect(master);
+    sfxBus = AC.createGain(); sfxBus.gain.value = .55; sfxBus.connect(master); const s1 = AC.createGain(); s1.gain.value = .12; sfxBus.connect(s1); s1.connect(conv);
+    musBus = AC.createGain(); musBus.gain.value = 0; musBus.connect(master); const s2 = AC.createGain(); s2.gain.value = .5; musBus.connect(s2); s2.connect(conv);
     AC.onstatechange = () => { syncMusic(); renderDock(); };
     return AC;
+  }
+  function impulse(sec) {
+    const r = AC.sampleRate, n = Math.floor(r * sec), b = AC.createBuffer(2, n, r);
+    for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); let lp = 0; for (let i = 0; i < n; i++) { lp = lp * .55 + (Math.random() * 2 - 1) * .45; d[i] = lp * Math.pow(1 - i / n, 3.2) * .6; } }
+    return b;
   }
   const audioOn = () => !!AC && AC.state === 'running';
   function unlock() {
@@ -318,54 +330,65 @@
     document.querySelectorAll('audio.peer').forEach(a => { if (a.paused && a.srcObject) a.play().catch(() => { }); });
   }
   ['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, unlock, { capture: true, passive: true }));
-  function tone(f, t0, dur, vol, type, f2, bus) {
+  function tone(f, t0, dur, vol, type, f2, bus, att) {
     const o = AC.createOscillator(), g = AC.createGain(); o.type = type || 'sine';
     o.frequency.setValueAtTime(f, t0); if (f2) o.frequency.exponentialRampToValueAtTime(f2, t0 + dur * .8);
-    g.gain.setValueAtTime(.0001, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + .015); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + (att || .012)); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
     o.connect(g); g.connect(bus || sfxBus); o.start(t0); o.stop(t0 + dur + .05);
   }
-  function noise(t0, dur, vol, f, q, type) { const b = AC.createBufferSource(); b.buffer = brown(); const bf = AC.createBiquadFilter(); bf.type = type || 'bandpass'; bf.frequency.value = f; bf.Q.value = q || 1; const g = AC.createGain(); g.gain.setValueAtTime(.0001, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + .02); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur); b.connect(bf); bf.connect(g); g.connect(sfxBus); b.start(t0, Math.random() * 2, dur + .1); }
+  function noise(t0, dur, vol, f, q, type) { const b = AC.createBufferSource(); b.buffer = brown(); const bf = AC.createBiquadFilter(); bf.type = type || 'bandpass'; bf.frequency.value = f; bf.Q.value = q || 1; const g = AC.createGain(); g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + .02); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur); b.connect(bf); bf.connect(g); g.connect(sfxBus); b.start(t0, Math.random() * 2, dur + .1); }
   const SFX = {
-    move: t => tone(520 + Math.random() * 60, t, .12, .035, 'triangle'),
-    sel: t => tone(990, t, .15, .04),
-    bump: t => tone(150, t, .16, .06, 'sine', 110),
-    push: t => { tone(110, t, .25, .09, 'sine', 80); noise(t, .2, .05, 300); },
-    fall: t => { noise(t, .4, .05, 900, 1, 'lowpass'); tone(90, t + .35, .4, .12, 'sine', 55); },
-    build: t => { tone(420, t, .09, .07, 'square', 380); tone(460, t + .12, .09, .06, 'square', 400); },
-    jump: t => tone(400, t, .3, .05, 'sine', 900),
-    on: t => { tone(784, t, .5, .06); tone(1175, t + .08, .6, .05); },
-    off: t => tone(587, t, .35, .045, 'sine', 440),
-    undo: t => tone(700, t, .14, .04, 'sine', 420),
-    join: t => { tone(523, t, .6, .07); tone(784, t + .15, .8, .06); },
-    pop: t => tone(740, t, .2, .06, 'sine', 1100),
-    win: t => [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, t + i * .14, 1.4, .07)),
+    move: t => tone(560 + Math.random() * 40, t, .14, .03, 'sine', 520),
+    sel: t => tone(988, t, .2, .035),
+    bump: t => tone(160, t, .18, .05, 'sine', 120),
+    push: t => { tone(120, t, .3, .08, 'sine', 85); noise(t, .18, .03, 260, .8); },
+    fall: t => { noise(t, .35, .03, 700, .7, 'lowpass'); tone(95, t + .33, .45, .1, 'sine', 60); },
+    build: t => { tone(820, t, .08, .05, 'sine', 520); tone(900, t + .13, .08, .045, 'sine', 560); },
+    jump: t => tone(420, t, .32, .045, 'sine', 880, null, .03),
+    on: t => { tone(784, t, .7, .05); tone(1175, t + .09, .8, .04); },
+    off: t => tone(587, t, .45, .04, 'sine', 466),
+    undo: t => tone(660, t, .16, .035, 'sine', 440),
+    join: t => { tone(523, t, .7, .055); tone(784, t + .15, .9, .05); },
+    pop: t => tone(740, t, .22, .05, 'sine', 1050),
+    win: t => [523.3, 659.3, 784, 1046.5, 1318.5].forEach((f, i) => tone(f, t + i * .15, 1.8, .055)),
   };
-  function sfx(k) { if (!PREF.sfx || !on('sfx') || !audioOn() || !SFX[k]) return; try { SFX[k](AC.currentTime + .01); } catch (e) { } }
-  function playEvents(evs) { const seen = new Set(); for (const e of evs) { const k = e.t === 'move' ? 'move' : e.t; if (seen.has(k)) continue; seen.add(k); sfx(k); } }
-  function brown() { if (noiseB) return noiseB; const n = AC.sampleRate * 3, b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0); let l = 0; for (let i = 0; i < n; i++) { l = (l + .02 * (Math.random() * 2 - 1)) / 1.02; d[i] = l * 3.5; } return noiseB = b; }
-  // موسيقى السما: كوردات ناعمة + أجراس + هوا
-  const CHORDS = [[[261.6, 329.6, 392], [220, 277.2, 329.6], [174.6, 220, 261.6], [196, 246.9, 293.7]], [[293.7, 370, 440], [246.9, 311.1, 370], [196, 246.9, 293.7], [220, 277.2, 329.6]]];
-  const BELLS = [523.3, 587.3, 659.3, 784, 880, 1046.5];
-  function startMusic() {
-    stopMusic(); const c = AC, nodes = [], timers = [], set = CHORDS[Math.max(0, gLv) % 2];
-    const out = c.createGain(); out.gain.value = 0; out.gain.setTargetAtTime(1, c.currentTime, 2); out.connect(musBus); nodes.push(out);
-    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; lp.connect(out);
-    const lfo = c.createOscillator(), lg = c.createGain(); lfo.frequency.value = .05; lg.gain.value = 350; lfo.connect(lg); lg.connect(lp.frequency); lfo.start(); nodes.push(lfo);
-    const vs = [0, 1, 2].map(() => { const o = c.createOscillator(), o2 = c.createOscillator(), g = c.createGain(); o.type = 'triangle'; o2.type = 'sine'; o2.detune.value = 7; g.gain.value = 0; o.connect(g); o2.connect(g); g.connect(lp); o.start(); o2.start(); nodes.push(o, o2); return { o, o2, g }; });
-    let ci = 0; const step = () => { const ch = set[ci++ % set.length], n = c.currentTime; vs.forEach((v, i) => { v.o.frequency.setTargetAtTime(ch[i] / 2, n, 1); v.o2.frequency.setTargetAtTime(ch[i] / 4, n, 1); v.g.gain.setTargetAtTime(i ? .03 : .045, n, 1.6); }); };
-    step(); timers.push(setInterval(step, 10000));
-    const wind = c.createBufferSource(); wind.buffer = brown(); wind.loop = true; const wf = c.createBiquadFilter(); wf.type = 'bandpass'; wf.frequency.value = 500; wf.Q.value = .6; const wg = c.createGain(); wg.gain.value = .025; const wl = c.createOscillator(), wlg = c.createGain(); wl.frequency.value = .08; wlg.gain.value = .02; wl.connect(wlg); wlg.connect(wg.gain); wind.connect(wf); wf.connect(wg); wg.connect(out); wind.start(); wl.start(); nodes.push(wind, wl);
-    const bell = () => { if (!mus) return; const n = c.currentTime, f = BELLS[Math.floor(Math.random() * BELLS.length)]; tone(f, n, 3, .022, 'sine', null, out); tone(f * 2.01, n, 1.5, .006, 'sine', null, out); timers.push(setTimeout(bell, 2200 + Math.random() * 4000)); };
-    timers.push(setTimeout(bell, 1200));
-    mus = { nodes, timers };
+  function sfx(k) { if (!PREF.sfx || !on('sfx') || !audioOn() || !SFX[k]) return; try { SFX[k](AC.currentTime + .02); } catch (e) { } }
+  function playEvents(evs) { const seen = new Set(); for (const e of evs) { const k = e.t; if (seen.has(k)) continue; seen.add(k); sfx(k); } }
+  function brown() {
+    if (noiseB) return noiseB; const n = AC.sampleRate * 3, b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0); let l = 0, pk = 0;
+    for (let i = 0; i < n; i++) { l = (l + .02 * (Math.random() * 2 - 1)) / 1.02; d[i] = l; pk = Math.max(pk, Math.abs(l)); }
+    for (let i = 0; i < n; i++) d[i] = d[i] / pk * .8; return noiseB = b;
   }
-  function stopMusic() { if (!mus) return; const m = mus; mus = null; m.timers.forEach(t => { clearInterval(t); clearTimeout(t); }); try { m.nodes[0].gain.setTargetAtTime(0, AC.currentTime, .4); } catch (e) { } setTimeout(() => m.nodes.forEach(n => { try { n.stop && n.stop(); } catch (e) { } try { n.disconnect(); } catch (e) { } }), 1500); }
+  // موسيقى السما: كوردات بتدخل في بعض بهدوء (من غير ما النغمة تزحلق) + أجراس، كلها نغمات صافية
+  const CHORDS = [[[261.6, 329.6, 392], [220, 261.6, 329.6], [174.6, 220, 261.6], [196, 246.9, 293.7]], [[293.7, 370, 440], [246.9, 293.7, 370], [196, 246.9, 293.7], [220, 277.2, 329.6]]];
+  const BELLS = [523.3, 587.3, 659.3, 784, 880, 1046.5];
+  function pad(out, freqs, t0) {
+    const len = 13, nodes = [];
+    freqs.forEach((f, i) => {
+      for (const [mul, vol] of [[.5, .024], [1, .014]]) {
+        const o = AC.createOscillator(), g = AC.createGain(); o.type = 'sine'; o.frequency.value = f * mul; o.detune.value = (i - 1) * 3;
+        g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + 3); g.gain.setValueAtTime(vol, t0 + len - 4); g.gain.linearRampToValueAtTime(0, t0 + len);
+        o.connect(g); g.connect(out); o.start(t0); o.stop(t0 + len + .1); nodes.push(o);
+      }
+    });
+    return nodes;
+  }
+  function startMusic() {
+    stopMusic(); const c = AC, timers = [], set = CHORDS[Math.max(0, gLv) % 2];
+    const out = c.createGain(); out.gain.value = 0; out.gain.setTargetAtTime(1, c.currentTime, 1.5);
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2200; lp.Q.value = .5; out.connect(lp); lp.connect(musBus);
+    let ci = 0; const step = () => { if (!mus) return; pad(out, set[ci++ % set.length], c.currentTime + .05); };
+    const bell = () => { if (!mus) return; const n = c.currentTime + .05, f = BELLS[Math.floor(Math.random() * BELLS.length)]; tone(f, n, 3.2, .018, 'sine', null, out, .02); tone(f * 2, n, 1.6, .004, 'sine', null, out, .02); timers.push(setTimeout(bell, 2600 + Math.random() * 4200)); };
+    mus = { out, timers };
+    step(); timers.push(setInterval(step, 10000)); timers.push(setTimeout(bell, 1500));
+  }
+  function stopMusic() { if (!mus) return; const m = mus; mus = null; m.timers.forEach(t => { clearInterval(t); clearTimeout(t); }); try { m.out.gain.setTargetAtTime(0, AC.currentTime, .4); } catch (e) { } setTimeout(() => { try { m.out.disconnect(); } catch (e) { } }, 2000); }
   function syncMusic() {
     const want = !!code && on('music') && PREF.mus && audioOn();
     if (want) { if (!mus) startMusic(); duck(talking, true); }
     else { if (musBus) musBus.gain.setTargetAtTime(0, AC.currentTime, .4); musLevel = 0; if (mus) stopMusic(); }
   }
-  function duck(t, force) { talking = t; if (!musBus || !mus) return; const target = t ? .22 : .6; if (force || Math.abs(target - musLevel) > .01) { musLevel = target; musBus.gain.setTargetAtTime(target, AC.currentTime, t ? .15 : 1.2); } }
+  function duck(t, force) { talking = t; if (!musBus || !mus) return; const target = t ? .3 : .75; if (force || Math.abs(target - musLevel) > .01) { musLevel = target; musBus.gain.setTargetAtTime(target, AC.currentTime, t ? .2 : 1.2); } }
 
   /* ===================== المايك (من موبايل لموبايل، لحد 4) ===================== */
   var V = { sid: null, mic: null, la: null, peers: {}, state: 'off' };
