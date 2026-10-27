@@ -1,0 +1,6 @@
+{
+  "appId": "com.arwah.game",
+  "appName": "الأربع أرواح",
+  "webDir": "www",
+  "android": { "backgroundColor": "#151d36" }
+}

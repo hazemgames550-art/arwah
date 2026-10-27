@@ -1,0 +1,14 @@
+{
+  "name": "الأربع أرواح",
+  "short_name": "الأربع أرواح",
+  "start_url": "./",
+  "display": "fullscreen",
+  "background_color": "#151d36",
+  "theme_color": "#151d36",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
